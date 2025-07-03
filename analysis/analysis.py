@@ -132,3 +132,4 @@ async def run_full_analysis():
 if __name__ == "__main__":
     success = asyncio.run(run_full_analysis())
     sys.exit(0 if success else 1)
+    
