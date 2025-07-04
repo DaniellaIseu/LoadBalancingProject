@@ -17,7 +17,8 @@ The system is designed to:
 ---
 
 ## ⚙️ Architecture
-``bash
+
+<pre>
                  +---------------------+
                  |     Client (curl)   |
                  +----------+----------+
@@ -32,9 +33,7 @@ The system is designed to:
  |  Server1  |  |  Server2  |  |  Server3  |   |  ...More...  |
  +-----------+  +-----------+  +-----------+   +-------------+
      Flask         Flask         Flask           Flask
-
-``
-
+</pre>
 ---
 
 ## Key Concepts
