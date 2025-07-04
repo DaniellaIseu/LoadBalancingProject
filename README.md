@@ -17,7 +17,7 @@ The system is designed to:
 ---
 
 ## ⚙️ Architecture
-``
+``bash
                  +---------------------+
                  |     Client (curl)   |
                  +----------+----------+
