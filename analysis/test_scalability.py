@@ -3,151 +3,150 @@ import aiohttp
 import requests
 import matplotlib.pyplot as plt
 import time
+import os
+import json
 from collections import defaultdict
 
-async def send_batch_requests(session, url, num_requests):
-    """Send a batch of requests and return server response counts"""
-    server_counts = defaultdict(int)
-    
-    tasks = []
-    for _ in range(num_requests):
-        tasks.append(send_request(session, url))
-    
-    results = await asyncio.gather(*tasks)
-    
-    for result in results:
-        if result:
-            server_counts[result] += 1
-    
-    return server_counts
+BASE_URL = "http://localhost:5050"
+NUM_REQUESTS = 10000
+RESULT_DIR = "analysis/results"
+RAW_DIR = os.path.join(RESULT_DIR, "raw_logs")
+
+# Create directories if they don't exist
+os.makedirs(RAW_DIR, exist_ok=True)
+
+# Store average load per server for line chart
+avg_load_per_n = []
+
+def wait_for_replicas(expected_n, timeout=20):
+    print(f"[WAIT] Waiting for {expected_n} replicas to be alive...")
+    for _ in range(timeout):
+        try:
+            r = requests.get(f"{BASE_URL}/rep")
+            data = r.json()["message"]
+            replicas = data["replicas"]
+            if len(replicas) == expected_n:
+                print(f"[OK] {expected_n} replicas ready: {replicas}")
+                return True
+            else:
+                print(f"[WAIT] Found {len(replicas)} replicas: {replicas}, retrying...")
+        except Exception as e:
+            print(f"[ERROR] /rep failed: {e}, retrying...")
+        time.sleep(1)
+    print("[FAIL] Timeout waiting for replicas.")
+    return False
+
+def reset_to_n3():
+    print("\n[RESET] Resetting to Server1, Server2, Server3 only...")
+    try:
+        requests.delete(f"{BASE_URL}/rm", json={"n": 100, "hostnames": []})
+        requests.post(f"{BASE_URL}/add", json={
+            "n": 3,
+            "hostnames": ["Server1", "Server2", "Server3"]
+        })
+    except Exception as e:
+        print(f"[WARN] Reset failed: {e}")
+
+def scale_to_n(n):
+    print(f"\n[SCALE] Scaling to N={n} servers...")
+    if n > 3:
+        extra = n - 3
+        dynamic_names = [f"dyn{i+1}" for i in range(extra)]
+        try:
+            requests.post(f"{BASE_URL}/add", json={"n": extra, "hostnames": dynamic_names})
+        except Exception as e:
+            print(f"[WARN] POST failed to /add, retrying... {e}")
+    elif n < 3:
+        try:
+            requests.delete(f"{BASE_URL}/rm", json={"n": 3 - n, "hostnames": []})
+        except Exception as e:
+            print(f"[WARN] DELETE failed to /rm: {e}")
 
 async def send_request(session, url):
-    """Send a single request and return the server that handled it"""
     try:
         async with session.get(url) as response:
             if response.status == 200:
                 data = await response.json()
-                message = data.get('message', '')
-                if 'Server' in message:
-                    return message.split('Server: ')[1] if 'Server: ' in message else message.split('from ')[1]
+                return data["message"].split(":")[-1].strip()
     except:
-        pass
-    return None
+        return "<Error> Request failed"
+    return "<Error> Unknown"
 
-def add_servers(lb_url, num_servers):
-    """Add servers to reach the target number"""
-    hostnames = [f"TestServer{i}" for i in range(1, num_servers-2)]  # -3 for existing servers
-    payload = {
-        "n": num_servers - 3,  # We already have 3 servers
-        "hostnames": hostnames
-    }
-    
-    try:
-        response = requests.post(f"{lb_url}/add", json=payload)
-        return response.status_code == 200
-    except:
-        return False
+async def run_requests():
+    print(f"[RUN] Sending {NUM_REQUESTS} requests...")
+    async with aiohttp.ClientSession() as session:
+        tasks = [send_request(session, f"{BASE_URL}/home") for _ in range(NUM_REQUESTS)]
+        return await asyncio.gather(*tasks)
 
-def remove_all_test_servers(lb_url):
-    """Remove all test servers to reset to original 3"""
-    try:
-        # Get current replicas
-        response = requests.get(f"{lb_url}/rep")
-        if response.status_code == 200:
-            replicas = response.json()['message']['replicas']
-            test_servers = [s for s in replicas if s.startswith('TestServer')]
-            
-            if test_servers:
-                payload = {
-                    "n": len(test_servers),
-                    "hostnames": test_servers
-                }
-                requests.delete(f"{lb_url}/rm", json=payload)
-    except:
-        pass
+def plot_distribution(server_counts, n):
+    servers = list(server_counts.keys())
+    counts = [server_counts[s] for s in servers]
+    total = sum(counts)
 
-async def test_scalability(lb_url="http://localhost:5050", num_requests=10000):
-    """A-2: Test scalability from N=2 to N=6 servers"""
-    print("Starting scalability test...")
-    
-    results = []
-    server_counts_data = []
-    
-    for n in range(2, 7):  # N = 2 to 6
-        print(f"\n--- Testing with N={n} servers ---")
-        
-        # Reset to 3 servers first
-        remove_all_test_servers(lb_url)
-        time.sleep(2)
-        
-        if n > 3:
-            # Add servers to reach target N
-            success = add_servers(lb_url, n)
-            if not success:
-                print(f"Failed to add servers for N={n}")
-                continue
-            time.sleep(3)  # Wait for servers to be ready
-        elif n < 3:
-            # Remove servers to reach target N
-            payload = {"n": 3-n, "hostnames": []}
-            requests.delete(f"{lb_url}/rm", json=payload)
-            time.sleep(2)
-        
-        # Verify current server count
-        response = requests.get(f"{lb_url}/rep")
-        if response.status_code == 200:
-            current_servers = len(response.json()['message']['replicas'])
-            print(f"Current servers: {current_servers}")
-        
-        # Run load test
-        start_time = time.time()
-        
-        async with aiohttp.ClientSession() as session:
-            server_counts = await send_batch_requests(session, f"{lb_url}/home", num_requests)
-        
-        end_time = time.time()
-        total_time = end_time - start_time
-        
-        # Calculate average load per server
-        total_requests = sum(server_counts.values())
-        avg_load = total_requests / len(server_counts) if server_counts else 0
-        
-        results.append({
-            'n_servers': n,
-            'avg_load': avg_load,
-            'total_time': total_time,
-            'total_requests': total_requests
-        })
-        
-        server_counts_data.append((n, dict(server_counts)))
-        
-        print(f"Average load per server: {avg_load:.1f}")
-        print(f"Time taken: {total_time:.2f} seconds")
-    
-    # Create line chart for average load
-    n_values = [r['n_servers'] for r in results]
-    avg_loads = [r['avg_load'] for r in results]
-    
-    plt.figure(figsize=(10, 6))
-    plt.plot(n_values, avg_loads, marker='o', linewidth=2, markersize=8, color='#FF6B6B')
-    plt.title(f'Load Balancer Scalability Analysis\n({num_requests} Requests per Test)')
-    plt.xlabel('Number of Servers (N)')
-    plt.ylabel('Average Load per Server')
-    plt.grid(True, alpha=0.3)
-    plt.xticks(n_values)
-    
-    # Add value labels
-    for x, y in zip(n_values, avg_loads):
-        plt.annotate(f'{y:.0f}', (x, y), textcoords="offset points", xytext=(0,10), ha='center')
-    
+    plt.figure(figsize=(8, 5))
+    plt.bar(servers, counts, color="teal")
+    plt.title(f"Load Distribution (N={n}) - {total} Requests")
+    plt.xlabel("Server")
+    plt.ylabel("Requests Handled")
+    plt.grid(True, linestyle="--", alpha=0.5)
     plt.tight_layout()
-    plt.savefig('results/scalability.png', dpi=300, bbox_inches='tight')
-    plt.show()
-    
-    return results, server_counts_data
+
+    img_path = os.path.join(RESULT_DIR, f"load_distribution_N{n}.png")
+    plt.savefig(img_path)
+    print(f"[PLOT] Saved: {img_path}")
+
+def plot_scalability_line_chart():
+    if not avg_load_per_n:
+        return
+
+    ns = [item[0] for item in avg_load_per_n]
+    avgs = [item[1] for item in avg_load_per_n]
+
+    plt.figure(figsize=(8, 5))
+    plt.plot(ns, avgs, marker='o', linestyle='-', color='blue')
+    plt.title("Scalability Test: Avg Load vs Number of Servers")
+    plt.xlabel("Number of Servers (N)")
+    plt.ylabel("Average Load per Server")
+    plt.grid(True, linestyle='--', alpha=0.5)
+    plt.tight_layout()
+
+    out_path = os.path.join(RESULT_DIR, "scalability_line_chart.png")
+    plt.savefig(out_path)
+    print(f"[LINE PLOT] Saved line chart to: {out_path}")
+
+def save_raw_log(server_counts, n):
+    path = os.path.join(RAW_DIR, f"raw_N{n}.json")
+    with open(path, "w") as f:
+        json.dump(server_counts, f, indent=2)
+    print(f"[LOG] Saved raw data: {path}")
+
+async def test_scalability():
+    for n in [4, 6]:  # Test N = 4 and N = 6
+        reset_to_n3()
+        scale_to_n(n)
+
+        if not wait_for_replicas(n):
+            continue
+
+        responses = await run_requests()
+        counter = defaultdict(int)
+        for resp in responses:
+            counter[resp] += 1
+
+        total = sum(counter.values())
+        print("\n=== Distribution Summary ===")
+        for k, v in sorted(counter.items(), key=lambda x: -x[1]):
+            perc = (v / total) * 100
+            print(f"{k}: {v} requests ({perc:.2f}%)")
+
+        avg = total / len(counter)
+        avg_load_per_n.append((n, avg))
+
+        plot_distribution(counter, n)
+        save_raw_log(counter, n)
+
+    # After all N values tested
+    plot_scalability_line_chart()
 
 if __name__ == "__main__":
-    import os
-    os.makedirs('results', exist_ok=True)
-    
     asyncio.run(test_scalability())
