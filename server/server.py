@@ -15,6 +15,10 @@ def home():
 
 @app.route('/heartbeat', methods=['GET'])
 def heartbeat():
+    return jsonify({
+        "message": f"Heartbeat OK from {NODE_ID}",
+        "status": "alive"
+    }), 200
     return "", 200
 
 if __name__ == '__main__':
